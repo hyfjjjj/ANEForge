@@ -57,6 +57,42 @@ Block fusion - the obvious way to remove the 25 program boundaries - barely
 helps at 2 and is rejected by the ANE compiler at 4, so it is not a path to
 closing the gap.
 
+## int8 weight streaming: +17% and half the disk
+
+`af.compile(..., int8=True)` streams linear weights as per-channel int8 and
+dequantizes during the tile DMA. It is worth a look here because the checkpoint
+is already int8-quantized - but the two schemes are **not the same thing**:
+
+| | scheme | format |
+| --- | --- | --- |
+| checkpoint (mflux/MLX export) | group-64 affine, zero point folded into the bias | **uint8** 0..255, one scale/bias per 64 elements |
+| aneforge `int8=True` | its own per-channel streaming quantization | **signed int8**, one scale per output channel |
+
+So the weights are quantized twice on this path: uint8/group-64 -> (dequantize)
+-> fp16 -> (aneforge requantizes) -> int8/per-channel. That is where the
+accuracy cost comes from.
+
+| weights | s/step | 4 steps | relerr vs mflux bf16 |
+| --- | --- | --- | --- |
+| fp16 | 3.06 | 12.3 s | 3.907e-02 |
+| **int8** | **2.54** | **10.2 s** | 6.013e-02 |
+
+Per-block that is 112.9 -> 99.6 ms, and the program on disk halves (236 -> 119 MB
+of `weights.bin`). Both numbers are against the same bf16 reference, so the
+3.9e-02 -> 6.0e-02 move is the extra quantization, and it is the price of the
+17%. Feeding aneforge per-group uint8 directly would avoid the round trip, but
+its interface is per-channel.
+
+One caution on the MLX side of these comparisons: warm single measurements of
+the reference moved between 2.15 and 4.41 s/step across runs on this machine.
+The ANE numbers were stable (3.06, 3.08); prefer them for A/B.
+
+## Compile cost
+
+Building the 26 programs takes ~115 s per process, and the on-disk cache does
+not reduce it - see [`compile-cache.md`](compile-cache.md) for the A/B and what
+the cache actually buys (re-emission, ~4 s; disk, 7.35 GB fp16 / 3.7 GB int8).
+
 ## On the hybrid idea
 
 Nothing measured here is "unoptimizable on the ANE" in a way that moving it to

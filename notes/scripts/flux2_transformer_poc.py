@@ -88,9 +88,10 @@ class AneTransformer:
   """The 25 blocks plus embeddings/output head, each a compiled program."""
 
   def __init__(self, txt: int, img: int, k_chunk: int = 1024, verbose: bool = True,
-               fuse: int = 1):
+               fuse: int = 1, int8: bool = False):
     self.txt, self.img, self.k_chunk, self.verbose = txt, img, k_chunk, verbose
     self.fuse = max(1, fuse)
+    self.int8 = int8
     self.S = txt + img
     self.cos, self.sin = rope_tables(make_ids(self.S))
     self.raw = load_shards()
@@ -120,7 +121,7 @@ class AneTransformer:
     x_img = af.input((self.img, 128))
     emb = af.concat([x_txt.linear(self._w("context_embedder.weight").astype(np.float16)),
                      x_img.linear(self._w("x_embedder.weight").astype(np.float16))], axis=0)
-    self.nets["embed"] = af.compile(emb)
+    self.nets["embed"] = af.compile(emb, int8=self.int8)
 
     # --- 5 double-stream blocks, joint [S, DIM] in and out ---
     for i in range(N_DOUBLE):
@@ -130,7 +131,7 @@ class AneTransformer:
                         self.cos, self.sin, mg, mt, self.k_chunk,
                         x_img=xj.slice_by_size([self.txt, 0], [self.img, DIM]),
                         x_txt=xj.slice_by_size([0, 0], [self.txt, DIM]))
-      self.nets[f"d{i}"] = af.compile(af.concat([st["txt"], st["img"]], axis=0))
+      self.nets[f"d{i}"] = af.compile(af.concat([st["txt"], st["img"]], axis=0), int8=self.int8)
       self._log(f"  double {i} compiled ({time.perf_counter() - t0:4.1f}s)")
 
     # --- 20 single-stream blocks: norm + modulation + attention + gate ---
@@ -144,7 +145,7 @@ class AneTransformer:
                             self.cos, self.sin, self.k_chunk,
                             x=modulate(x, ms[0], ms[1]))["out"]
         x = x + attn * ms[2].astype(np.float16)
-      self.nets[f"s{i}"] = af.compile(x)
+      self.nets[f"s{i}"] = af.compile(x, int8=self.int8)
       self._log(f"  single {i}-{min(i + n, N_SINGLE) - 1} compiled ({time.perf_counter() - t0:4.1f}s)")
 
     # --- norm_out (Ada) + proj_out on the image stream only ---
@@ -154,7 +155,7 @@ class AneTransformer:
     x = af.input((self.img, DIM))
     n = x.layer_norm(ONES, ZEROS, eps=1e-6)
     n = n * (1.0 + self.scale.astype(np.float16)) + self.shift.astype(np.float16)
-    self.nets["head"] = af.compile(n.linear(self._w("proj_out.weight").astype(np.float16)))
+    self.nets["head"] = af.compile(n.linear(self._w("proj_out.weight").astype(np.float16)), int8=self.int8)
     # the raw shards are only needed while compiling: 4 GB that the inference
     # path should not keep resident (compiled programs hold their own weights)
     self.raw = {}
@@ -228,6 +229,7 @@ def main() -> None:
   ap.add_argument("--k-chunk", type=int, default=1024)
   ap.add_argument("--reference", action="store_true", help="also run mflux's transformer (bf16)")
   ap.add_argument("--fuse", type=int, default=1, help="single-stream blocks per program")
+  ap.add_argument("--int8", action="store_true", help="stream int8 weights (half the bytes)")
   args = ap.parse_args()
 
   rng = np.random.default_rng(0)
@@ -237,7 +239,7 @@ def main() -> None:
   t_emb = timestep_embedding(1000.0)
   print(f"txt={args.txt} img={args.img} joint={args.txt + args.img}")
 
-  tr = AneTransformer(args.txt, args.img, args.k_chunk, fuse=args.fuse)
+  tr = AneTransformer(args.txt, args.img, args.k_chunk, fuse=args.fuse, int8=args.int8)
   # time/guidance embedding is tiny and per-step: keep it host-side
   w1, w2 = tr._w("time_guidance_embed.linear_1.weight"), tr._w("time_guidance_embed.linear_2.weight")
   temb32 = (silu(t_emb @ w1.T) @ w2.T).astype(np.float32)
