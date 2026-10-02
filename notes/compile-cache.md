@@ -66,13 +66,84 @@ Element-wise difference between the two outputs: **0.0** (bit-identical).
 
 ## What is left
 
-~10 s of the 26-program build is now emission + hashing + loading the bundles,
-down from ~115 s. The disk the cache uses (7.35 GB fp16, 3.7 GB with int8
-streaming, no eviction) now buys a 12x startup, so keeping it is the right
-trade - the opposite of the conclusion before the fix.
+~10 s of the 26-program build is now emission + hashing + loading the program
+directories, down from ~115 s. The disk the cache uses (7.35 GB fp16, 3.7 GB
+with int8 streaming, no eviction) now buys a 12x startup, so keeping it is the
+right trade - the opposite of the conclusion before the fix.
+
+The next section splits that ~10 s apart, and the one after it is a memory
+footgun worth knowing about when compiling many programs in one process.
 
 Reverting if needed: `git checkout aneforge/_lib/ane_e5rt_dispatch.mm` and
 rebuild, or set `ANEFORGE_FORCE_RECOMPILE=1` at run time.
+
+## What the warm build is actually spending its time on
+
+Measured with aneforge 0.4.1.dev37 while porting the model into fluxlab, one
+FLUX.2 double-stream block (245.8 MB of fp16 weights, program directory already
+populated):
+
+| call | time | what it does |
+| --- | --- | --- |
+| `E5RT.compile(mil, cache_dir=dir/cache, inputs, outputs)` on the existing dir | **6.4 ms** | loads the compiled program; never opens `weights.bin` |
+| the same call with `cache_dir` pointed at an empty directory | **5081 ms** | a real Apple compile (so the 6.4 ms is a genuine cache hit) |
+| `af.compile(graph)` for the same program | 0.3-0.7 s | rebuilds the graph, reads and dequantizes the block's weights, hashes MIL + weights to find that same dir |
+
+Across a whole 27-program set (512x768, int8), a warm build is 18.5 s through
+`af.compile` and **143 ms** loading each program directly (slowest program
+41 ms; the first load in a process costs ~25 ms extra). So essentially all of
+the warm build is re-deriving a content key whose value the caller could have
+recorded the first time.
+
+That is also why the direct load can skip the weights: **a compiled program is
+a netlist, not a copy of the weights.** A program directory's `cache/` holds
+~8 KB of e5rt bundle (largest file 2.7 KB), and the MIL refers to the weights as
+`BLOBFILE(path = string("@model_path/weights.bin"), offset = ...)` - they are
+streamed from `weights.bin` at dispatch. Earlier wording in this note ("loading
+the bundles") implied the weights were inside the bundle; they are not. This is
+also why it is safe to drop the dequantized checkpoint from host memory after
+compiling, and why `weights.bin` must stay on disk for dispatch.
+
+What aneforge could expose to make the fast path the default: `_emit_program_dir`
+already knows the program directory and the returned `Model` carries the port
+names/shapes (`_inputs`, `_out_name`, `_out_shape`), so a `Model.program_dir`
+attribute plus a public `af.load_program(dir)` (or a `reuse_dir=` argument to
+`af.compile`) would turn repeated-process startup from seconds into
+milliseconds. fluxlab does it today by intercepting `_emit_program_dir` for the
+directory and calling `E5RT.compile` itself; its output is bit-identical to the
+`af.compile` path.
+
+## The route optimizer memo keeps every weight alive
+
+`compile(opt="routes")` is the default and is cost-model driven; its bookkeeping
+memoizes graphs by identity (`aneforge/_optimize.py`):
+
+```python
+_TOPO_MEMO: dict[int, tuple] = {}
+
+def _topo(out):
+  hit = _TOPO_MEMO.get(id(out))
+  if hit is not None and hit[0] is out: return hit[1]
+  order = _raw_topo(out)
+  if len(_TOPO_MEMO) >= 256: _TOPO_MEMO.clear()
+  _TOPO_MEMO[id(out)] = (out, order)
+  return order
+```
+
+`out` is the graph root, and every weight is a constant hanging off it, so an
+entry pins that program's weights for the life of the process (until the
+256-entry cap happens to trip). Compiling five double-stream blocks in one
+process without clearing it leaves **2.5 GB** more resident than clearing after
+each compile - measured as peak RSS, 5.68 GB vs 3.18 GB for the same five
+compiles, i.e. ~0.5 GB per block, about twice the block's fp16 weights (the
+transient peak of a single compile is in both numbers). Extrapolated to the
+27-program FLUX.2 set that is ~7 GB of weights silently held, which cancels the
+point of loading block weights only while compiling them.
+
+`compress=` (and `opt=0`) never enter `_compile_routes`, so those paths are
+immune. For the dense-fp16 path, `aneforge._optimize._TOPO_MEMO.clear()` after
+each compile is enough - that is what fluxlab does. A weak reference in the
+memo, or a byte budget instead of a 256-entry cap, would remove the footgun.
 
 ## Cache locations
 

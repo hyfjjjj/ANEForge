@@ -30,7 +30,8 @@ cross-machine numbers, see [`bench/results/ROOFLINES.md`](../bench/results/ROOFL
 | [`flux2-klein-4b-ane.md`](flux2-klein-4b-ane.md) | FLUX.2-klein-4B weight inventory, token math for 512x768, measured per-layer ANE cost, and what a port to aneforge would take. |
 | [`flux2-block-poc.md`](flux2-block-poc.md) | One single-stream block actually built and running on the ANE vs mflux: RoPE convention, 2048-token attention, fp16 numerics, and the layout trap that made it 2.5x slower. |
 | [`flux2-transformer-e2e.md`](flux2-transformer-e2e.md) | The whole 25-block transformer on the ANE, vs the MLX/GPU path it would replace: 3.06 vs 2.15 s/step on an M4 Pro, and what the accuracy and hybrid trade-offs actually look like. |
-| [`compile-cache.md`](compile-cache.md) | Why `af.compile` recompiled every program every time (`force_recompilation=1` in the shim), the one-line fix, and the 12x startup it buys (115 s -> 9.7 s for FLUX.2, bit-identical output). |
+| [`compile-cache.md`](compile-cache.md) | Why `af.compile` recompiled every program every time (`force_recompilation=1` in the shim), the one-line fix, and the 12x startup it buys (115 s -> 9.7 s for FLUX.2, bit-identical output). Also: where that warm build actually goes (a direct program load is 6 ms against 0.3-0.7 s through `af.compile`), that a compiled program is a netlist with weights streamed at dispatch, and the route-optimizer graph memo that pins ~7 GB of weights if it is not cleared. |
+| [`int4-lut-cost.md`](int4-lut-cost.md) | `compress="int4"` at real weight shapes: 7.2 s / 1.6 GB for a 3072x3072, 69.8 s / 13 GB for FLUX.2's largest linear, i.e. ~45-50 min for one pass over the model. Why the tests miss it and what would fix it. |
 
 ## Scripts
 
@@ -77,3 +78,16 @@ python3 notes/scripts/flux2_transformer_poc.py --txt 512 --img 1536
   content-addressed cache by default, `ANEFORGE_FORCE_RECOMPILE=1` to opt out)
   takes a FLUX.2 rebuild from 115 s to **9.7 s** with bit-identical output. See
   [`compile-cache.md`](compile-cache.md).
+- Almost all of that remaining 9.7 s is the cache *lookup*, not the load: a
+  compiled program loads from its directory in **6 ms** and never reads
+  `weights.bin` (they stream at dispatch), while `af.compile` spends 0.3-0.7 s
+  per program re-deriving the content hash. A 27-program FLUX.2 set: 18.5 s
+  through `af.compile` vs **0.143 s** loading directly.
+- `compile(opt="routes")` memoizes graphs by identity and thereby pins every
+  weight: five double-stream blocks compiled without clearing the memo leave
+  **2.5 GB** more resident than clearing after each compile (~7 GB extrapolated
+  to the full 27-program set).
+- `compress="int4"` costs **69.8 s and 13 GB of transient memory** for FLUX.2's
+  largest linear alone (it trains a codebook over every element of the tensor),
+  which is why 4-bit checkpoints currently land on int8 programs instead. See
+  [`int4-lut-cost.md`](int4-lut-cost.md).
