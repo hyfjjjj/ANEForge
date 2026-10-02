@@ -80,6 +80,42 @@ faster for it.
 **This looks like a compiler issue worth reporting**: a layout-only consumer
 (the transpose) should not cost 150x more depending on its producer's op kind.
 
+**Follow-up, measured later in the full production port: the rank-5 last-axis
+slice is itself a layout trap** - see the next section.
+
+## Follow-up: the rank-5 slice costs more than the rope
+
+The fix above still views the tensor as rank-5 `[1,H,S,64,2]` and slices the
+LAST axis for the real/imaginary parts. In the full model that slice turns out
+to be expensive: it keeps the compiler from holding the matmul layout of the
+`rms_norm` output feeding it, so every block pays whole-tensor layout
+conversions. Replacing it with a permutation-matrix matmul plus a bit-expanded
+cos/sin table
+
+    out = x*C + swap(x)*S     # C[2i]=C[2i+1]=cos_i, S[2i]=-sin_i, S[2i+1]=+sin_i
+    swap(x) = x @ P           # 128x128 permutation matrix, P[i, i^1] = 1
+
+is element-wise identical (negating sin is exact) and takes a single-stream
+block from **101 to 65 ms** at S=2048.
+
+| rope form | isolated | in the block |
+| --- | --- | --- |
+| rank-5 view, last-axis slice, 4 arith, concat | 4.76 ms/tensor | 101 ms/block |
+| permutation-matmul swap + expanded tables | 3.87 ms/tensor | **65 ms/block** |
+
+The 0.9 ms/tensor gap in isolation is not where the 35 ms/block comes from - the
+surrounding ops decide what layout the slice lands in, and in the real graph
+they do not have one to spare. Same lesson as the transpose, one level down:
+prefer ops that keep the matmul layout (a matmul swap) over ops that force a
+repack (a last-axis slice of a rank-5 view), and measure in the full graph.
+
+Two smaller measured items from the same pass, for completeness: splitting the
+fused `to_qkv_mlp_proj` into five linears and summing the `to_out` K blocks
+instead of concatenating is worth 2.1 ms/block (it removes five slices of a
+[S,27648] tensor and one [S,12288] concat); and the block's weight bytes are on
+the critical path - the same block compiles to 114.7 ms with fp16 weights and
+101.2 ms with int8, so every halving of the weight encoding buys ~12%.
+
 ## Other measured pieces (S=2048, isolated)
 
 | piece | ms |
