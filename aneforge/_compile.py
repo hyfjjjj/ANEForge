@@ -57,15 +57,24 @@ def op(*names: str):
   return register
 
 
+# Per-mode accuracy-gate defaults for the compress= weight encodings (see _Emitter.__init__).
+_DEFAULT_ATOL = {"int4": 0.2, "blockwise": 0.05}
+
+
 class _Emitter:
   """Accumulates MIL lines + the weight BLOBFILE while walking the graph."""
 
-  def __init__(self, int8: bool, compress: str | None = None, compress_atol: float = 0.05,
+  def __init__(self, int8: bool, compress: str | None = None, compress_atol: float | None = None,
         block_size: int = 32, family: int | None = None) -> None:
     # compress: None (fp16), "int8", "int4", "sparse", "blockwise", "auto"; int8=True aliases "int8".
     self.compress = compress if compress is not None else ("int8" if int8 else None)
     self.int8 = self.compress == "int8"
-    self.compress_atol = compress_atol
+    # The default is per-mode. A per-tensor 16-level codebook has a ~0.09-0.10 floor on
+    # gaussian-like weights (FLUX.2's linears measure 0.114-0.146, while that checkpoint's
+    # own 4-bit package carries 0.093-0.096 against the bf16 original), so the old shared
+    # 0.05 default rejected every real weight and `int4` silently fell back to int8. The
+    # gate still guards against pathological tensors; pass an explicit value to override.
+    self.compress_atol = _DEFAULT_ATOL.get(self.compress or "", 0.05) if compress_atol is None else compress_atol
     self.block_size = block_size       # inner-dim block for compress="blockwise"
     # auto is family-aware: only natively-streaming encodings are candidates.
     if self.compress == "auto" and family is not None:
@@ -987,7 +996,7 @@ class MultiModel:
 
 
 def compile_multi(outs, build_dir=None, int8: bool = False, compress: str | None = None,
-          compress_atol: float = 0.05, block_size: int = 32) -> MultiModel:
+          compress_atol: float | None = None, block_size: int = 32) -> MultiModel:
   """Lower a multi-output graph into one fused program with N named output ports (fp16 I/O). `int8`/`compress`
   quantize the constant weights as in `compile` (per-channel int8 / int4-LUT / blockwise); I/O stays fp16."""
   order = _topo_multi(*outs)
@@ -1332,7 +1341,7 @@ def _retarget_for(out: Tensor, target) -> Tensor:
 
 
 def compile(out: Tensor, int8: bool = False, build_dir=None, opt: "str | int | None" = "routes",
-      compress: str | None = None, compress_atol: float = 0.05,
+      compress: str | None = None, compress_atol: float | None = None,
       block_size: int = 32, validate: bool = False, target=None,
       _check_precision: bool = True):
   """Lower `out` into ONE fused ANE program (or a segmented plan if it has `af.sdpa` nodes)."""
@@ -1663,7 +1672,7 @@ class SegmentedModel:
 
 
 def _compile_segmented(out: Tensor, int8: bool, build_dir,
-           compress: str | None = None, compress_atol: float = 0.05,
+           compress: str | None = None, compress_atol: float | None = None,
            block_size: int = 32, family: int | None = None):
   order = _topo(out)
   bad = sorted({t.op for t in order if t.op not in NETPLIST_OPS and t.op != "input" and t.op not in _EMIT})

@@ -1,24 +1,18 @@
-# int4 (LUT) weight compression is unusable at model scale
+# int4 (LUT) weight compression: what it cost, and what it took to use it
 
-`compress="int4"` is the one weight encoding that would match a 4-bit source
+`compress="int4"` is the one weight encoding that matches a 4-bit source
 checkpoint's size - 0.5 B/param against the 0.5625 B/param an MLX
 `quantization_level: 4` package uses - so it is the natural choice when the
-checkpoint is already 4-bit. It is also far and away the slowest thing in the
-library, because `_blob.palettize_lut4` trains its codebook on the whole tensor:
+checkpoint is already 4-bit. Two things stood between it and being usable at
+model scale: the codebook trainer's cost, and an accuracy gate no real weight
+could pass. Both are fixed; the accuracy price is now measurable.
 
-```python
-def palettize_lut4(W):
-  flat = W.reshape(-1).astype(np.float32)
-  ...
-  for _ in range(20):
-    idx = np.abs(flat[:, None] - centroids[None, :]).argmin(axis=1)
-```
+## What the trainer cost
 
-Each of the 20 Lloyd iterations materializes an `[N, 16]` fp32 distance matrix
-(plus its `abs`), so both time and memory are linear in the element count with a
-constant ~64x the tensor itself.
-
-Measured on an M4 Pro (one process per size, `ru_maxrss` after the call):
+`_blob.palettize_lut4` trained its 16 centroids with 20 element-wise Lloyd
+iterations, each materializing an `[N, 16]` fp32 distance matrix (plus its
+`abs`), so both time and memory were linear in the element count with a
+constant ~64x the tensor itself:
 
 | weight | params | `palettize_lut4` | peak RSS |
 | --- | --- | --- | --- |
@@ -26,26 +20,78 @@ Measured on an M4 Pro (one process per size, `ru_maxrss` after the call):
 | 9216x3072 | 28.3 M | 22.17 s | 4.81 GB |
 | 27648x3072 | 84.9 M | 69.78 s | 12.96 GB |
 
-FLUX.2-klein-4B's transformer is ~3.8 G parameters and its largest single
+FLUX.2-klein-4B's transformer is ~3.7 G parameters and its largest single
 linear is the 27648x3072 fused qkv+MLP projection, so one int4 pass over the
-model costs **~45-50 minutes**, and that one tensor alone needs **~13 GB** of
-transient host memory. The library's own tests never see this: they train
-codebooks on 32x64 and 16x16 tensors (`tests/test_compress.py`).
+model cost **~45-50 minutes**, with ~13 GB of transient host memory for that one
+tensor.
 
-Two changes, both local to `palettize_lut4`, would make it usable:
+## What replaced it
 
-- train the 16 centroids on a subsample - a few 100k values are plenty for 1-D
-  k-means - instead of every element, and
-- assign indices in row blocks, since only the assignment step needs the
-  `[N, 16]` temporary.
+A per-tensor 16-level codebook is a *1-D* quantizer, so neither the assignment
+nor the update needs the `[N, 16]` matrix:
 
-Whether the surrounding accuracy gate (`compress_atol`, default 0.05, falling
-back per tensor to per-channel int8 with a `CompressionFallbackWarning`) would
-then accept FLUX.2's weights is a separate, unmeasured question - one 16-entry
-codebook per weight matrix is a coarse approximation, and a rejected tensor
-lands at int8, twice the size the source checkpoint had.
+- assign by midpoint lookup - `searchsorted` over the 15 midpoints of sorted
+  levels is exact for 1-D, and breaks ties the way `argmin` did;
+- update with two weighted `bincount`s (mass and mass*value) over the assigned
+  bins instead of 16 masked gathers.
 
-Context for why this matters: ANE compute is fp16 either way, so the encoding
-only decides memory and disk footprint. A caller with a 4-bit checkpoint
-currently has to choose between int8 programs (1.7x the source size) and a
-~45 minute compile.
+And the k-means objective depends only on the *multiset* of values, not their
+positions, so the codebook can be trained on a histogram: one chunked pass
+builds a 2^20-bin histogram (over a range taken from a fixed subsample's
+1e-5/1-1e-5 quantiles, so a single outlier cannot coarsen the bulk), and Lloyd
+then runs on the non-empty bins - a few 100k points instead of 84.9 M.
+
+| weight | params | new | peak RSS | relerr (old -> new) |
+| --- | --- | --- | --- | --- |
+| 27648x3072 | 84.9 M | **1.89 s** | **1.83 GB** | 0.1121 -> 0.1140 |
+
+38x faster, 7x smaller peak, and the quality is the same in kind: the 1.7%
+relerr difference is the clipped range plus the histogram init, and the bin
+count does not matter - 2^20, 2^22 and 2^24 bins all give 0.1140 on that tensor.
+A whole-model int4 pass is now minutes, not ~50.
+
+## The gate was the other half
+
+`compress_atol` defaulted to 0.05 for every mode, and a per-tensor 16-level
+codebook cannot reach that. Measured against the **bf16 original** of the same
+checkpoint (all three packages exist on this machine, so this is a real
+comparison and not an estimate):
+
+| tensor | source int4 | source int8 | our LUT4 (on bf16) | int4 source + LUT4 |
+| --- | --- | --- | --- | --- |
+| `single...to_qkv_mlp_proj` (27648x3072) | 0.0940 | 0.0072 | 0.1143 | 0.1439 |
+| `single...to_out` (3072x12288) | 0.0926 | 0.0071 | 0.1192 | 0.1463 |
+| `transformer...to_q` (3072x3072) | 0.0964 | 0.0075 | 0.1457 | 0.1709 |
+
+So the *source's own* 4-bit package carries a 0.093-0.096 relative error, and
+the 0.05 default rejected every one of these weights - int4 fell back to int8
+silently (the fallback is a warning, easy to miss in a build log). The default
+is now per-mode (`_compile._DEFAULT_ATOL`): **0.2 for int4**, 0.05 for
+blockwise, whose per-block int8 sits far under it. The gate still catches
+pathological tensors.
+
+Two things fall out of that table:
+
+- **Deploying a 4-bit source as int4 programs is roughly as faithful as the
+  source itself** - 0.144-0.171 against the bf16 original, i.e. ~1.5x the
+  source's own error, since it is the same weights quantized a second time.
+- **int8 programs are ~20x more faithful (0.007) at 2x the size.** Both are
+  legitimate points on the curve; the change is that int4 is a choice now
+  instead of a 50-minute compile that lands on int8 anyway.
+
+Why a per-tensor codebook cannot do better: 16 levels on gaussian-like weights
+floor at ~0.097 (Lloyd-Max), which is exactly where the source's 0.093 sits.
+MLX's group-64 affine adaptation buys ~20% over one codebook for the whole
+tensor on the worst shapes (0.094 vs 0.114 on the fused projection, 0.096 vs
+0.146 on `to_q`); per-row codebooks would close most of the rest for
++0.0104 B/param, since a 3072-wide row costs 32 B to describe.
+
+## Still open
+
+- Per-row (or per-group) LUTs through the lut shape's leading dims: would take
+  the worst tensors from 0.146 to ~0.10 for +1% size. Needs a device probe of
+  what `constexpr_lut_to_dense` accepts first - nothing here has tried a lut
+  whose leading dims are not 1.
+- The 0.14-0.17 compounding is a *weight* error; what it does to a generated
+  image is a separate question, answered (for fluxlab's use) by an A/B against
+  the int8 program path rather than by this number.

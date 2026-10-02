@@ -36,7 +36,7 @@ _RESNETS: dict[int, tuple[str, tuple[int, int, int, int]]] = {
 
 
 def load_resnet(name_or_depth: int | str = 18, int8: bool = False, compress: str | None = None,
-                compress_atol: float = 0.05, build_dir: str | None = None,
+                compress_atol: float | None = None, build_dir: str | None = None,
                 weights: str = "IMAGENET1K_V1") -> "Vision":
   """Load a ResNet as a fused ANE classifier; BatchNorm folded into the preceding conv at load.
   `name_or_depth` takes a torchvision depth (50, "50", "resnet50" -> 18/34/50/101 ImageNet weights)
@@ -46,7 +46,7 @@ def load_resnet(name_or_depth: int | str = 18, int8: bool = False, compress: str
 
 
 def load_resnet18(int8: bool = False, compress: str | None = None,
-                  compress_atol: float = 0.05, build_dir: str | None = None) -> "Vision":
+                  compress_atol: float | None = None, build_dir: str | None = None) -> "Vision":
   """Load torchvision ResNet-18 (ImageNet) as a fused ANE classifier; BatchNorm folded into the preceding conv at load."""
   return Vision(int8=int8, compress=compress, compress_atol=compress_atol, build_dir=build_dir)
 
@@ -103,7 +103,7 @@ def _load_hf_resnet(name: str) -> tuple[dict, str, list[int]]:
 
 class Vision:
   def __init__(self, name_or_depth: int | str = 18, int8: bool = False, compress: str | None = None,
-               compress_atol: float = 0.05, build_dir: str | None = None,
+               compress_atol: float | None = None, build_dir: str | None = None,
                weights: str = "IMAGENET1K_V1") -> None:
     if isinstance(name_or_depth, str) and "/" in name_or_depth:   # a Hugging Face repo id, not a depth
       self.depth = None
@@ -116,7 +116,7 @@ class Vision:
       self.sd = {k: v.detach().numpy().astype(np.float32) for k, v in m.state_dict().items()}
     self.int8 = int8
     self.compress = compress
-    self.compress_atol = compress_atol
+    self.compress_atol = compress_atol    # None -> the mode's default (see _compile._DEFAULT_ATOL)
     self.build_dir = build_dir
     self._model = self._build()
 

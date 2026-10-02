@@ -115,6 +115,25 @@ def test_weight_int4_used_when_accurate():
   assert "constexpr_lut_to_dense" in "\n".join(em.lines)
 
 
+def test_int4_default_atol_admits_realistic_weights():
+  """The int4 default must clear a 16-level codebook's own floor (~0.1 on gaussian
+  weights): the old shared 0.05 default rejected every real weight, so compress='int4'
+  silently fell back to int8 unless the caller raised the budget by hand."""
+  em = _compile._Emitter(int8=False, compress="int4")            # no explicit atol
+  assert em.compress_atol == _compile._DEFAULT_ATOL["int4"] == 0.2
+  W = np.random.default_rng(5).standard_normal((64, 128)).astype(np.float32)
+  em.weight("w", W, allow_int8=True, allow_int4=True)
+  assert "constexpr_lut_to_dense" in "\n".join(em.lines)
+
+
+def test_blockwise_default_atol_unchanged():
+  """Per-block int8 sits far under its budget, so the 0.05 gate stays as it was."""
+  em = _compile._Emitter(int8=False, compress="blockwise")
+  assert em.compress_atol == _compile._DEFAULT_ATOL["blockwise"] == 0.05
+  em8 = _compile._Emitter(int8=True, compress_atol=0.9)
+  assert em8.compress_atol == 0.9                                # explicit values still win
+
+
 # Task 4 - on-device tests: int4-LUT runs on the ANE + weights.bin is smaller
 
 

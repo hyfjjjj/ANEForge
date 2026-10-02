@@ -203,7 +203,9 @@ the entitled CoreML route. Use `af.image_input(uint8)`.
 emits compressed weights that stream (dequant-during-DMA) rather than fold to
 dense fp16, so a weight-bandwidth-bound op gets a real eval-latency win, not just a
 smaller file. `compress=None` (the default) is byte-identical to fp16. int4-LUT and
-sparse are accuracy-gated (int4 falls back int4->int8->fp16 within `compress_atol`).
+sparse are accuracy-gated (int4 falls back int4->int8->fp16 within `compress_atol`,
+whose default is per mode: `0.2` for int4 - a 16-level per-tensor codebook floors at
+~0.09-0.10 on gaussian-like weights - and `0.05` for blockwise).
 All `constexpr_*` quant forms, including blockwise-affine, are reachable on the e5rt path.
 
 Which formats stream natively is per-family (`tg.native_streams(family)`, with

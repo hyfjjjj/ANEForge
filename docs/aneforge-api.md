@@ -215,7 +215,7 @@ only when these loaders are used.
 
 ```python
 af.compile(out, int8=False, build_dir=None, opt="routes",
-           compress=None, compress_atol=0.05, block_size=32,
+           compress=None, compress_atol=None, block_size=32,
            validate=False, target=None)
 ```
 
@@ -224,7 +224,7 @@ af.compile(out, int8=False, build_dir=None, opt="routes",
 | `int8` | `False` | Alias for `compress='int8'` (per-channel int8 weight streaming). |
 | `opt` | `'routes'` | Graph optimizer. `'routes'` is the **lossless** default route pass (cost-model-driven, never changes numerics, no on-device measurement). `0` is the byte-identical historical path. `1` adds the cost-model variant pick. `2` / `'max'` autotunes by on-device measurement and validates each variant against the `opt=0` baseline. |
 | `compress` | `None` | Weight encoding - see [weight compression](#weight-compression). |
-| `compress_atol` | `0.05` | Relative-L2 fallback budget for the accuracy-gated `int4` / `blockwise` modes. |
+| `compress_atol` | per mode | Relative-L2 fallback budget for the accuracy-gated `int4` / `blockwise` modes: `0.2` for `int4`, `0.05` for `blockwise`. `int4` needs the wider budget because a per-tensor 16-level codebook's own floor is ~0.09-0.10 on gaussian-like weights (FLUX.2's linears measure 0.114-0.146), so a `0.05` gate rejected every real weight and silently fell back to int8. |
 | `block_size` | `32` | Inner-dim block width for `compress='blockwise'`. |
 | `validate` | `False` | Raise (rather than warn) on a flagged fp16-precision risk. |
 | `target` | `None` | Compile / gate for another ANE family - see [cross-chip deployment](#cross-chip-deployment). |
@@ -243,7 +243,7 @@ stream (dequantise during the tile DMA) inside the same fused program.
 | --- | --- | --- |
 | `None` | fp16 (default) | Byte-identical at `opt=0`. |
 | `'int8'` | per-channel int8 | `constexpr_affine_dequantize`; half the weight bytes. `int8=True` is the alias. |
-| `'int4'` | 4-bit LUT palettization | Per-tensor; accuracy-gated with an automatic fallback to int8 -> fp16 controlled by `compress_atol`. |
+| `'int4'` | 4-bit LUT palettization | Per-tensor 16-level codebook, trained on a value histogram (linear in the element count); accuracy-gated with an automatic fallback to int8 -> fp16 controlled by `compress_atol` (default `0.2` - see above). |
 | `'sparse'` | unstructured bitmask | Emitted when the weight is >=50% zeros, else fp16. |
 | `'blockwise'` | per-inner-block int8 | `constexpr_blockwise_shift_scale`, `block_size` columns per scale; accuracy-gated -> int8 -> fp16. |
 | `'auto'` | per-weight best | Sparse if sparse, else int4 if accurate, else int8, else fp16. |

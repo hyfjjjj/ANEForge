@@ -31,7 +31,7 @@ cross-machine numbers, see [`bench/results/ROOFLINES.md`](../bench/results/ROOFL
 | [`flux2-block-poc.md`](flux2-block-poc.md) | One single-stream block actually built and running on the ANE vs mflux: RoPE convention, 2048-token attention, fp16 numerics, the layout traps (the transpose-after-concat, and the rank-5 rope slice worth 35 ms/block), and why a sub-graph measurement - including "attention is slow" and the GPU-offload idea - measures the host path instead. |
 | [`flux2-transformer-e2e.md`](flux2-transformer-e2e.md) | The whole 25-block transformer on the ANE, vs the MLX/GPU path it would replace: 3.06 vs 2.15 s/step in the POC on an M4 Pro, and what the accuracy and hybrid trade-offs actually look like. Updated with the production port: 1.63 vs 2.20 s/step, and where a steady step actually goes. |
 | [`compile-cache.md`](compile-cache.md) | Why `af.compile` recompiled every program every time (`force_recompilation=1` in the shim), the one-line fix, and the 12x startup it buys (115 s -> 9.7 s for FLUX.2, bit-identical output). Also: where that warm build actually goes (a direct program load is 6 ms against 0.3-0.7 s through `af.compile`), that a compiled program is a netlist with weights streamed at dispatch, and the route-optimizer graph memo that pins ~7 GB of weights if it is not cleared. |
-| [`int4-lut-cost.md`](int4-lut-cost.md) | `compress="int4"` at real weight shapes: 7.2 s / 1.6 GB for a 3072x3072, 69.8 s / 13 GB for FLUX.2's largest linear, i.e. ~45-50 min for one pass over the model. Why the tests miss it and what would fix it. |
+| [`int4-lut-cost.md`](int4-lut-cost.md) | `compress="int4"` at real weight shapes: what the element-wise trainer cost (69.8 s / 13 GB for FLUX.2's largest linear, i.e. ~45-50 min per pass) and what replaced it (value-histogram Lloyd + midpoint assignment: **1.89 s / 1.83 GB**, 38x, same quality). Plus the accuracy calibration behind the per-mode gate default, against the bf16 original. |
 
 ## Scripts
 
@@ -101,9 +101,14 @@ python3 notes/scripts/flux2_transformer_poc.py --txt 512 --img 1536
   weight: five double-stream blocks compiled without clearing the memo leave
   **2.5 GB** more resident than clearing after each compile (~7 GB extrapolated
   to the full 27-program set).
-- `compress="int4"` costs **69.8 s and 13 GB of transient memory** for FLUX.2's
-  largest linear alone (it trains a codebook over every element of the tensor),
-  which is why 4-bit checkpoints currently land on int8 programs instead. See
+- `compress="int4"` used to cost 69.8 s and 13 GB of transient memory for
+  FLUX.2's largest linear alone (it trained a codebook over every element).
+  Training on a value histogram instead makes it **1.89 s / 1.83 GB at the same
+  quality** (38x), and the accuracy gate now defaults per mode (**0.2** for
+  int4) because a 16-level per-tensor codebook floors at ~0.1 - the old shared
+  0.05 default rejected every real weight, so int4 silently fell back to int8.
+  Against the bf16 original: the source's own 4-bit package is 0.093-0.096, our
+  LUT4 is 0.114-0.146, int8 programs are 0.007. See
   [`int4-lut-cost.md`](int4-lut-cost.md).
 - The weights stream from `weights.bin` at dispatch, and the **first execute of
   a freshly loaded program pays for it**: ~5 ms more than its steady state per
