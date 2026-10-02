@@ -30,7 +30,7 @@ cross-machine numbers, see [`bench/results/ROOFLINES.md`](../bench/results/ROOFL
 | [`flux2-klein-4b-ane.md`](flux2-klein-4b-ane.md) | FLUX.2-klein-4B weight inventory, token math for 512x768, measured per-layer ANE cost, and what a port to aneforge would take. |
 | [`flux2-block-poc.md`](flux2-block-poc.md) | One single-stream block actually built and running on the ANE vs mflux: RoPE convention, 2048-token attention, fp16 numerics, and the layout trap that made it 2.5x slower. |
 | [`flux2-transformer-e2e.md`](flux2-transformer-e2e.md) | The whole 25-block transformer on the ANE, vs the MLX/GPU path it would replace: 3.06 vs 2.15 s/step on an M4 Pro, and what the accuracy and hybrid trade-offs actually look like. |
-| [`compile-cache.md`](compile-cache.md) | What `af.compile`'s content-addressed cache actually buys (re-emission, ~0.15 s/program) and what it costs (7.35 GB per build) - and why compiling the same program again is not faster. |
+| [`compile-cache.md`](compile-cache.md) | Why `af.compile` recompiled every program every time (`force_recompilation=1` in the shim), the one-line fix, and the 12x startup it buys (115 s -> 9.7 s for FLUX.2, bit-identical output). |
 
 ## Scripts
 
@@ -72,6 +72,8 @@ python3 notes/scripts/flux2_transformer_poc.py --txt 512 --img 1536
 - Streaming int8 weights (`int8=True`) takes it to **2.54 s/step** and halves
   the program size, at the cost of an extra quantization round
   (3.9e-02 -> 6.0e-02 against the same bf16 reference).
-- `af.compile`'s on-disk cache does **not** make a repeat compile faster
-  (2.39 s cold vs 2.45 s warm, clean A/B); it only skips re-emission. See
+- `af.compile` recompiled every program on every process start because the
+  dispatch shim set `force_recompilation=1`. Gating that flag (reuse the
+  content-addressed cache by default, `ANEFORGE_FORCE_RECOMPILE=1` to opt out)
+  takes a FLUX.2 rebuild from 115 s to **9.7 s** with bit-identical output. See
   [`compile-cache.md`](compile-cache.md).

@@ -89,9 +89,12 @@ The ANE numbers were stable (3.06, 3.08); prefer them for A/B.
 
 ## Compile cost
 
-Building the 26 programs takes ~115 s per process, and the on-disk cache does
-not reduce it - see [`compile-cache.md`](compile-cache.md) for the A/B and what
-the cache actually buys (re-emission, ~4 s; disk, 7.35 GB fp16 / 3.7 GB int8).
+Building the 26 programs took ~115 s per process in every run measured above,
+because the dispatch shim forced recompilation and never read the cache back.
+Gating that flag (see [`compile-cache.md`](compile-cache.md)) brings a warm
+build down to **9.7 s** with bit-identical output - so the first run pays
+~86-115 s and every run after that pays ~10 s. The numbers in this doc were
+measured before the fix and are unaffected by it (inference timing is the same).
 
 ## On the hybrid idea
 
