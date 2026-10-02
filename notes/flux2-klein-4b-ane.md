@@ -178,6 +178,21 @@ is the template to follow.
    dequantization work entirely.
 4. **Attention at 2048 tokens.** Untested on this engine at that scale.
 
+## 7b. Update after the block POC
+
+The single-block POC ([`flux2-block-poc.md`](flux2-block-poc.md)) built one
+single-stream block as a real graph and measured it end to end: **113.65 ms** at
+2048 tokens, with fp16 accuracy matching the MLX backend's bf16 (4.48e-03 vs
+4.34e-03 against an fp32 reference). Three things this changes above:
+
+- Risk 1 (fp16 numerics) is largely retired for a single block - the ANE is as
+  accurate as what the project already ships.
+- Risk 4 (attention at 2048 tokens) is retired: sdpa itself is 26 ms, and the
+  decomposed tiled path is what runs (the native layer needs `min(q,k seq) < 512`).
+- The per-step estimate moves **up**, from 1.4-1.5 s to **2.5-3 s**: the
+  plumbing between GEMMs dominates, not the GEMMs. See the POC doc for the
+  layout trap that caused half of that.
+
 ## 8. Next step if this is pursued
 
 A single-block proof of concept: build one single-stream block (fused

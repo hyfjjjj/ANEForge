@@ -28,6 +28,7 @@ cross-machine numbers, see [`bench/results/ROOFLINES.md`](../bench/results/ROOFL
 | [`ane-gemm-roofline.md`](ane-gemm-roofline.md) | How many TOPS does this ANE actually deliver on fp16 GEMM? Square-N sweep, dispatch floor, large-N falloff. |
 | [`large-k-cliff.md`](large-k-cliff.md) | Throughput collapses below 2 TF/s once K > 4096, and a split-K workaround recovers 5x. The most actionable finding here. |
 | [`flux2-klein-4b-ane.md`](flux2-klein-4b-ane.md) | FLUX.2-klein-4B weight inventory, token math for 512x768, measured per-layer ANE cost, and what a port to aneforge would take. |
+| [`flux2-block-poc.md`](flux2-block-poc.md) | One single-stream block actually built and running on the ANE vs mflux: RoPE convention, 2048-token attention, fp16 numerics, and the layout trap that made it 2.5x slower. |
 
 ## Scripts
 
@@ -52,3 +53,7 @@ config values it encodes are quoted in the doc.
 - FLUX.2-klein-4B at 512x768 is 1536 image + 512 text tokens; its weight GEMMs
   cost **3.20 s/denoise step** monolithic vs **1.4-1.5 s/step** with split-K
   (+/-10% run to run; see the variance note in the FLUX.2 doc).
+- One real single-stream block, built as a graph and measured end to end, is
+  **113.65 ms** at 2048 tokens - so a whole-file budget is closer to
+  **2.5-3 s/step** than the GEMM-only number above. The ANE's fp16 output
+  matches the MLX backend's bf16 accuracy (both ~4.4e-03 vs fp32).
