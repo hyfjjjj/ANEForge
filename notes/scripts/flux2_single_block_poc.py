@@ -96,14 +96,15 @@ def interleaved_rope(x: af.Tensor, cos: np.ndarray, sin: np.ndarray) -> af.Tenso
 
 def build_block(seq: int, weights: dict[str, np.ndarray], cos: np.ndarray,
                 sin: np.ndarray, split_k: int = 0,
-                attn_tile: int = 0, split_proj: bool = False) -> dict[str, af.Tensor]:
+                attn_tile: int = 0, split_proj: bool = False,
+                x: "af.Tensor | None" = None) -> dict[str, af.Tensor]:
   """The whole block as one aneforge graph; returns each stage's output tensor.
 
   `split_k` > 0 chunks the to_out K dimension (K=12288 is past the engine's
   cliff at 4096; see notes/large-k-cliff.md).
   """
   S = seq
-  x = af.input((S, DIM))
+  x = af.input((S, DIM)) if x is None else x
 
   w_full = weights["to_qkv_mlp_proj"].astype(np.float16)
   if split_proj:
