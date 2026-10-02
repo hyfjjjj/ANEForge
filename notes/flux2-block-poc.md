@@ -130,6 +130,49 @@ opposite of the intuition from the FLOP counts (QK^T + AV = 51.6 GFLOP, ~8.6 ms
 at the measured GEMM rate). Query-tiling the native sdpa was tried and did not
 help (225 ms either way), so the decomposed path is what a port should use.
 
+Caveat added later: that 26 ms is a sub-graph measurement and is inflated by the
+host path - see "A sub-graph measurement measures the host path" below. Inside
+the fused block the attention is ~8.9 ms.
+
+## A sub-graph measurement measures the host path
+
+Isolating an op into its own program measures the transfer in and out of it, not
+the op. The ANE's host-facing buffers move data at **~7-10 GB/s** (measured: a
+201 MB tensor round-trips in 58.8 ms, and adding two more elementwise passes
+over it changes nothing, so the internal work is not what costs). Any sub-graph
+whose I/O is large is therefore dominated by transfer - which is exactly the
+case for attention, whose q/k/v are 38 MB in and 12.6 MB out at S=2048:
+
+| attention at S=2048, 24 heads | ms |
+| --- | --- |
+| compiled alone with q/k/v as inputs | 26.3 |
+| the same attention inside the fused block (from splitting the block) | **8.9** |
+| the GPU's fused kernel, same shapes, data already resident | 7.9 |
+
+In the fused graph the attention runs at ~5.8 TF/s - in line with a dense matmul
+of the same size (5.5) - and the softmax's 2048-wide row reductions and `exp`,
+which dominate the isolated number, are largely free once the compiler keeps the
+intermediate on-chip. The lesson is the same as the layout traps: measure
+whole-graph, or diff two graphs with the same I/O shape, and never conclude from
+a sub-graph's absolute milliseconds.
+
+That also settles the obvious idea of handing attention to the GPU:
+
+| single-stream block | ms |
+| --- | --- |
+| fused, everything on the ANE | 63.7 |
+| split: ANE front half | 44.3 |
+| q/k/v out (38 MB), GPU attention, result back (12.6 MB) | 14.9 |
+| ANE back half | 10.5 |
+| split total | **69.7** |
+
+The round trip plus the extra program costs more than the 8.9 ms of attention it
+replaces, and even with the transfer set to zero it only breaks even
+(44.3 + 7.9 + 10.5 = 62.7). Sharing the buffers instead of copying them is not
+an option: the attention's intermediates live inside the compiled program, not
+in any addressable memory, so a cross-engine split has to materialize them on
+the program's ports first - which is the split.
+
 ## What this does to the earlier estimate
 
 `flux2-klein-4b-ane.md` estimated 1.4-1.5 s per denoise step from GEMMs measured

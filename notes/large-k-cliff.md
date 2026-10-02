@@ -81,6 +81,38 @@ for p in parts[1:]:
 (`docs/op-catalog.md`); this machine is in the "exact" group, and the numeric
 check above confirms it. Verify on older silicon before trusting it there.
 
+## A capacity cliff that is really this cliff: pin K when you sweep
+
+A later sweep looked like an on-chip capacity cliff. It varied an intermediate
+tensor from 4 MB to 128 MB with small I/O, and the time jumped 3.0x from 16.8 to
+33.6 MB and another 6.3x from 33.6 to 67.1 MB - right around the ~32 MB SRAM
+figure people quote for the ANE. It was this cliff in disguise: the sweep used N
+as both the intermediate width and the contraction length of the matmul that
+consumed it, so every step also lengthened K (K = N, up to 65536).
+
+Re-run with K pinned at 128, I/O at [256,128] in and [N] out, and only the
+intermediate `[256, N]` growing, the same matmul scales smoothly:
+
+| intermediate | ms | intermediate traffic |
+| --- | --- | --- |
+| 4.2 MB | 0.33 | 12.7 GB/s |
+| 8.4 MB | 0.46 | 18.3 GB/s |
+| 16.8 MB | 0.85 | 19.8 GB/s |
+| 25.2 MB | 1.24 | 20.3 GB/s |
+| 33.6 MB | 1.63 | 20.6 GB/s |
+
+Throughput *rises* with size and there is no cliff through 33.6 MB; a row
+reduction over the intermediate is close to free. A direct test in the
+production block agrees: N-chunking the MLP branch so its widest tensor drops
+from 37.7 MB to 4.2 MB changes a 63-64 ms block by less than the run-to-run
+noise (63.5 / 63.1 / 63.6 / 63.4 ms).
+
+So for these shapes there is no measurable on-chip capacity effect, and the
+"restructure to fit ~32 MB" idea is not a lever here. That is not proof the ANE
+has no capacity limit - the SRAM size is undocumented and another op pattern
+might hit one - but a super-linear jump in a size sweep is more likely to be
+this cliff than a capacity effect. Pin K.
+
 ## Open questions
 
 - Why 4096? The cliff is sharp enough to look like a hard tile limit in the
