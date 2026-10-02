@@ -86,12 +86,41 @@ tensor on the worst shapes (0.094 vs 0.114 on the fused projection, 0.096 vs
 0.146 on `to_q`); per-row codebooks would close most of the rest for
 +0.0104 B/param, since a 3072-wide row costs 32 B to describe.
 
+## The A/B relative error saturates at this error level
+
+fluxlab's `bench_opt/ane_ab.py` verifies a program set by Frobenius relerr
+against mflux running the same weights - it is how the int8 path was checked
+(5.6e-02). At int4's weight error the same harness reads **0.747**, and that is
+not a broken encoding: perturbing the *reference itself* the same way - every
+2-D weight of the bf16 reference replaced by its LUT4 round-trip (mean weight
+error 0.1188, every other input identical) - moves its output by **relerr
+1.0849**. A weight perturbation of ~0.12 is amplified ~9x through 25 blocks
+under the harness's random inputs.
+
+So the metric detects small perturbations and saturates for large ones: at
+int4's error level it says "different", not "how different". Codebook quality at
+this level has to be judged on generated images (or on the weights themselves,
+as the table above does).
+
+## What the error does to an image
+
+Measured in fluxlab on the same int4 checkpoint, same prompt and seed, 4 steps,
+against the MLX path on that checkpoint:
+
+| program encoding | vs the MLX reference | |
+| --- | --- | --- |
+| int8 (weight error 0.007) | mean abs diff 5.4/255 | **PSNR 27.1 dB** |
+| int4 (weight error 0.14) | mean abs diff 33.9/255 | **PSNR 14.6 dB** |
+
+Both images are clean and of the same apparent quality - but int8 reproduces
+the reference's sample almost pixel for pixel, while int4 lands on a *different*
+one. A 4-step distilled sampler is that sensitive to a 0.14 weight perturbation;
+int4 is a size/fidelity trade (1.86 GB and 1.60 s/step against int8's 3.71 GB
+and 1.64 s/step), not a free win.
+
 ## Still open
 
 - Per-row (or per-group) LUTs through the lut shape's leading dims: would take
   the worst tensors from 0.146 to ~0.10 for +1% size. Needs a device probe of
   what `constexpr_lut_to_dense` accepts first - nothing here has tried a lut
   whose leading dims are not 1.
-- The 0.14-0.17 compounding is a *weight* error; what it does to a generated
-  image is a separate question, answered (for fluxlab's use) by an A/B against
-  the int8 program path rather than by this number.
