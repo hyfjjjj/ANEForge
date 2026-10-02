@@ -113,6 +113,44 @@ milliseconds. fluxlab does it today by intercepting `_emit_program_dir` for the
 directory and calling `E5RT.compile` itself; its output is bit-identical to the
 `af.compile` path.
 
+## The first execute after a load is not free
+
+The direct load is 6 ms and never opens `weights.bin` - but the weights still
+have to reach the engine, and the *first execute* of a freshly loaded program
+pays for it. Measured while porting into fluxlab (512x768, int8 streaming, 27
+programs, warm page cache, one process, `bench_opt/ane_step_breakdown.py`):
+
+| program | weights.bin | first execute | steady execute | excess |
+| --- | --- | --- | --- | --- |
+| 5 x double block | 245.9 MB | 73.4-74.1 ms | 67.4-67.6 ms | +5.8 .. +6.6 |
+| 20 x single block | 122.9 MB | 66.6-68.5 ms | 62.3-62.5 ms | +4.2 .. +6.1 |
+| embed | 24.0 MB | 3.99 ms | 2.68 ms | +1.31 |
+| head | 0.4 MB | 2.77 ms | 1.83 ms | +0.94 |
+| total | 3.71 GB | | | **+138 ms** |
+
+The excess is not proportional to the weight bytes: `head` carries 0.4 MB and
+still pays 0.94 ms, while doubling a block's weights (123 -> 246 MB) adds less
+than 1 ms. So it is mostly a fixed per-program cost (~0.9 ms, the e5rt/ANE side
+mapping each program's resources) plus a weak size term - not a plain copy at
+some bandwidth (~27 GB/s if it were one, which no measured host path here
+reaches).
+
+It is paid per **load cycle**, not per process: `Program.release()` followed by
+a reload pays it again (a second image in the same process, after fluxlab's
+stage-unload release/reload, still shows a 1.91 s first step against a 1.64 s
+steady one), and a fresh process with a warm page cache shows the same 1.94 s,
+so it is not disk I/O.
+
+Across the 27-program set that is ~0.14 s; adding the program load (~0.10 s,
+above) and the first host-side modulation/RoPE computation, the first denoise
+step of a freshly loaded set is **~0.29 s slower** than steady state (1.93 vs
+1.64 s at 512x768).
+
+Pre-warming is not a lever: the excess is bound to the execute itself, so a
+warm-up dispatch costs a full step (1.6 s) to save 0.14 s of it. The way to
+amortize it is to keep the programs loaded (`FLUX2_STAGE_UNLOAD=off` in
+fluxlab) when one process serves several images.
+
 ## The route optimizer memo keeps every weight alive
 
 `compile(opt="routes")` is the default and is cost-model driven; its bookkeeping

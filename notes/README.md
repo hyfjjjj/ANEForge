@@ -29,7 +29,7 @@ cross-machine numbers, see [`bench/results/ROOFLINES.md`](../bench/results/ROOFL
 | [`large-k-cliff.md`](large-k-cliff.md) | Throughput collapses below 2 TF/s once K > 4096, and a split-K workaround recovers 5x. The most actionable finding here. Also: a size sweep that looked like a ~32 MB on-chip capacity cliff was this cliff in disguise - pin K when you sweep. |
 | [`flux2-klein-4b-ane.md`](flux2-klein-4b-ane.md) | FLUX.2-klein-4B weight inventory, token math for 512x768, measured per-layer ANE cost, and what a port to aneforge would take. |
 | [`flux2-block-poc.md`](flux2-block-poc.md) | One single-stream block actually built and running on the ANE vs mflux: RoPE convention, 2048-token attention, fp16 numerics, the layout traps (the transpose-after-concat, and the rank-5 rope slice worth 35 ms/block), and why a sub-graph measurement - including "attention is slow" and the GPU-offload idea - measures the host path instead. |
-| [`flux2-transformer-e2e.md`](flux2-transformer-e2e.md) | The whole 25-block transformer on the ANE, vs the MLX/GPU path it would replace: 3.06 vs 2.15 s/step on an M4 Pro, and what the accuracy and hybrid trade-offs actually look like. |
+| [`flux2-transformer-e2e.md`](flux2-transformer-e2e.md) | The whole 25-block transformer on the ANE, vs the MLX/GPU path it would replace: 3.06 vs 2.15 s/step in the POC on an M4 Pro, and what the accuracy and hybrid trade-offs actually look like. Updated with the production port: 1.63 vs 2.20 s/step, and where a steady step actually goes. |
 | [`compile-cache.md`](compile-cache.md) | Why `af.compile` recompiled every program every time (`force_recompilation=1` in the shim), the one-line fix, and the 12x startup it buys (115 s -> 9.7 s for FLUX.2, bit-identical output). Also: where that warm build actually goes (a direct program load is 6 ms against 0.3-0.7 s through `af.compile`), that a compiled program is a netlist with weights streamed at dispatch, and the route-optimizer graph memo that pins ~7 GB of weights if it is not cleared. |
 | [`int4-lut-cost.md`](int4-lut-cost.md) | `compress="int4"` at real weight shapes: 7.2 s / 1.6 GB for a 3072x3072, 69.8 s / 13 GB for FLUX.2's largest linear, i.e. ~45-50 min for one pass over the model. Why the tests miss it and what would fix it. |
 
@@ -99,3 +99,13 @@ python3 notes/scripts/flux2_transformer_poc.py --txt 512 --img 1536
   largest linear alone (it trains a codebook over every element of the tensor),
   which is why 4-bit checkpoints currently land on int8 programs instead. See
   [`int4-lut-cost.md`](int4-lut-cost.md).
+- The weights stream from `weights.bin` at dispatch, and the **first execute of
+  a freshly loaded program pays for it**: ~5 ms more than its steady state per
+  block, ~0.14 s over a 27-program set, mostly a fixed per-program cost (a
+  0.4 MB program still pays 0.9 ms). It is charged per release+reload cycle,
+  not per process. See [`compile-cache.md`](compile-cache.md).
+- A production FLUX.2 step is **97.8% ANE execute, 1.9% host copies between
+  programs (~10 GB/s), 0.2% everything else** - and a generation loop's printed
+  "per step" is an average whose first step is ~0.29 s slower, which is how a
+  phantom 90 ms/step of host overhead appeared. See
+  [`flux2-transformer-e2e.md`](flux2-transformer-e2e.md).

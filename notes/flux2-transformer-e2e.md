@@ -28,6 +28,60 @@ The MLX number is a warm 3-run minimum with the model loaded (reload included:
 weights every call - not a fair comparison, and worth stating because it inverted
 the conclusion.
 
+**Superseded (2026-10-02): the port moved into fluxlab and now runs 1.63 s/step
+against the GPU's 2.20 s/step - 26% faster, not 40% slower.** The update section
+below has the production breakdown; the POC numbers that follow stay for the
+record.
+
+## Update: the production port (fluxlab), and where a step actually goes
+
+Everything below this section is the POC as first measured. Moved into
+fluxlab's ANE backend - int8 streaming everywhere, split-K by default, the rope
+rewritten as a permutation matmul, modulation computed on the GPU, zero-copy
+program boundaries - the same transformer runs **1.63 s/step** warm at 512x768
+against **2.20 s/step** for the MLX/GPU path on the same machine, same
+checkpoint, same prompt, measured minutes apart: the ANE is now 26% *faster*
+than the GPU it would replace, where the POC was 40% slower. Numerics are at
+the int8-streaming level (relerr vs mflux bf16 5.7e-02), and end to end the
+image takes 8.3 s (ANE) vs 10.5 s (GPU), text encoder and VAE included.
+
+Where a steady step goes, with timers wrapped around the real generation loop
+(4 steps, same process, `bench_opt/ane_step_breakdown.py`):
+
+| segment | ms/step | share |
+| --- | --- | --- |
+| execute (27 programs, ANE compute + wait) | 1591.5 | 97.8% |
+| write inputs (host memcpy between program buffers) | 31.5 | 1.9% |
+| everything else | 3.7 | 0.2% |
+
+"Everything else" is 3.7 ms of: the mx->numpy input conversion (0.9), reading
+the output view (0.8), the loop's `mx.eval` (1.8), the memoized modulation
+(0.2), the RoPE tables (0.1) and mflux's scheduler (0.03).
+
+The 1.9% is the price of one program per block: 27 boundaries carrying up to
+12.58 MB each ([2048, 3072] fp16), ~320 MB/step at ~10 GB/s - the same
+host-facing buffer bandwidth the sub-graph measurements in
+[`flux2-block-poc.md`](flux2-block-poc.md) ran into. `Program.share_buffer`
+only rebinds ports *inside* a program, so a cross-program hand-off without the
+copy is not available today; fusing blocks is the only way to remove
+boundaries (worth 3% at 2 blocks/program, and the compiler rejects 4).
+
+The execute time is 13.86 TFLOP / 1591.5 ms = **8.7 TF/s**, the same rate a
+single block sustains on its own, so assembling 25 of them adds no per-step
+overhead beyond the copies. The remaining distance to the engine's best
+measured GEMM rate (~10 TF/s, [`large-k-cliff.md`](large-k-cliff.md)) lives
+inside the programs - layout conversions, softmax, elementwise ops - which is
+what the block-level tuning addresses.
+
+One methodology trap, because it cost a detour: the per-step number a
+generation loop prints is an **average over its steps**, and step 1 is ~0.29 s
+slower than the rest (see [`compile-cache.md`](compile-cache.md)), so a 4-step
+run reports 1.72 s/step against a 1.64 s steady state. Comparing that average
+with a min-of-N harness number produced a phantom ~90 ms/step of "host
+overhead"; the same-process breakdown above is what disproved it. Compare like
+with like. (The GPU path has the same shape: 2.20 s/step steady, 2.71 s for
+step 1.)
+
 ## Where the time goes (per step, 2048 tokens)
 
 | program | ms | | program | ms |
