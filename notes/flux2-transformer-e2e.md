@@ -54,6 +54,9 @@ Where a steady step goes, with timers wrapped around the real generation loop
 | write inputs (host memcpy between program buffers) | 31.5 | 1.9% |
 | everything else | 3.7 | 0.2% |
 
+Per single-stream block (execute-only, 62.4 ms steady): the six GEMMs 45.9 ms,
+attention ~8.9 ms, everything else (norm, rope, silu, gate, residual) ~7.6 ms.
+
 "Everything else" is 3.7 ms of: the mx->numpy input conversion (0.9), reading
 the output view (0.8), the loop's `mx.eval` (1.8), the memoized modulation
 (0.2), the RoPE tables (0.1) and mflux's scheduler (0.03).
@@ -68,10 +71,17 @@ boundaries (worth 3% at 2 blocks/program, and the compiler rejects 4).
 
 The execute time is 13.86 TFLOP / 1591.5 ms = **8.7 TF/s**, the same rate a
 single block sustains on its own, so assembling 25 of them adds no per-step
-overhead beyond the copies. The remaining distance to the engine's best
-measured GEMM rate (~10 TF/s, [`large-k-cliff.md`](large-k-cliff.md)) lives
-inside the programs - layout conversions, softmax, elementwise ops - which is
-what the block-level tuning addresses.
+overhead beyond the copies.
+
+Where that sits against the engine, execute-only throughout: an isolated GEMM
+reaches **15.1 TF/s**, the six GEMMs of one single-stream block reach **10.96
+TF/s** inside their program (45.87 ms against ~36 ms if they ran at their
+isolated rates - see [`ane-gemm-roofline.md`](ane-gemm-roofline.md)), and the
+production step is 8.9 TF/s effective. So the step is at 81% of what its own
+GEMMs do in context, and those are at 73% of the isolated ceiling; the residue
+is the ~8.9 ms of attention and ~7.6 ms of norms/rope/silu/layout per block.
+That is where the remaining optimization room is - not in precision or
+algorithm.
 
 One methodology trap, because it cost a detour: the per-step number a
 generation loop prints is an **average over its steps**, and step 1 is ~0.29 s

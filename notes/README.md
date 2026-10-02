@@ -25,7 +25,7 @@ cross-machine numbers, see [`bench/results/ROOFLINES.md`](../bench/results/ROOFL
 
 | Doc | What it answers |
 | --- | --- |
-| [`ane-gemm-roofline.md`](ane-gemm-roofline.md) | How many TOPS does this ANE actually deliver on fp16 GEMM? Square-N sweep, dispatch floor, large-N falloff. |
+| [`ane-gemm-roofline.md`](ane-gemm-roofline.md) | How many TOPS does this ANE actually deliver on fp16 GEMM? Square-N sweep, dispatch floor, large-N falloff - and the revisit that separates the host path from the engine: **~15 TF/s execute-only vs 7.7-10 through `net(x)`**, plus what survives inside a six-GEMM program (~11). |
 | [`large-k-cliff.md`](large-k-cliff.md) | Throughput collapses below 2 TF/s once K > 4096, and a split-K workaround recovers 5x. The most actionable finding here. Also: a size sweep that looked like a ~32 MB on-chip capacity cliff was this cliff in disguise - pin K when you sweep. |
 | [`flux2-klein-4b-ane.md`](flux2-klein-4b-ane.md) | FLUX.2-klein-4B weight inventory, token math for 512x768, measured per-layer ANE cost, and what a port to aneforge would take. |
 | [`flux2-block-poc.md`](flux2-block-poc.md) | One single-stream block actually built and running on the ANE vs mflux: RoPE convention, 2048-token attention, fp16 numerics, the layout traps (the transpose-after-concat, and the rank-5 rope slice worth 35 ms/block), and why a sub-graph measurement - including "attention is slow" and the GPU-offload idea - measures the host path instead. |
@@ -40,6 +40,7 @@ All run from the repo root with `PYTHONPATH=.`, no sudo needed, no files written
 ```sh
 PYTHONPATH=. python3 notes/scripts/ane_gemm_sweep.py 512 1024 2048 3072 4096
 PYTHONPATH=. python3 notes/scripts/ane_split_k_bench.py 2048 12288 3072
+PYTHONPATH=. python3 notes/scripts/ane_peak_bench.py
 PYTHONPATH=. python3 notes/scripts/flux2_klein_layer_bench.py
 ```
 
@@ -60,7 +61,12 @@ python3 notes/scripts/flux2_transformer_poc.py --txt 512 --img 1536
 - Square fp16 GEMM peaks at **~6.2 TF/s** (N=2048-3072); small N is
   dispatch-bound, N >= 4096 falls off.
 - With K split into <= 1024 chunks, the same hardware sustains **~10 TF/s** on
-  wide-N GEMMs - so 6.2 TF/s is a shape artifact, not a hardware ceiling.
+  wide-N GEMMs *through the dispatch path*; with the host path out of the way
+  (input written once, `execute()` repeated) the engine itself holds **~15 TF/s**
+  - 79% of the fp16 half of Apple's 38 TOPS int8, or 40% if that 38 counts MACs.
+  So 6.2 TF/s is a shape artifact *and* the ~10 TF/s wide-N figure was the host
+  path, not the ceiling. Inside a six-GEMM program (a FLUX.2 block's shape mix),
+  ~11 TF/s survives.
 - FLUX.2-klein-4B at 512x768 is 1536 image + 512 text tokens; its weight GEMMs
   cost **3.20 s/denoise step** monolithic vs **1.4-1.5 s/step** with split-K
   (+/-10% run to run; see the variance note in the FLUX.2 doc).

@@ -64,6 +64,17 @@ Re-measured alone with 15 reps to rule out a timing artifact:
 artifact of square GEMMs, not a hardware ceiling. Wide-N GEMMs have more
 arithmetic intensity per streamed byte and go faster.
 
+**Update (2026-10-02): the ~10 TF/s is the dispatch rate, not the engine's.**
+Every number in this note went through `net(x)`, which pays the host write of
+the activation and the read-back of the output (~7-10 GB/s); on wide-N shapes,
+where the output is the big tensor, that is what the number was hitting.
+Re-measured with the input written once and only `execute()` repeated, the same
+chunked shapes run at **15.1 TF/s** (13.4-15.1 across shapes) - table in
+[`ane-gemm-roofline.md`](ane-gemm-roofline.md). The cliff itself, the 5.3x
+split-K recovery and every ratio here are unaffected (same-harness comparisons).
+One refinement: chunk 1024 and 2048 tie at ~15 TF/s execute-only, and 4096 is
+already on the cliff (10.07).
+
 ## The graph that does it
 
 ```python
